@@ -67,7 +67,8 @@ struct AneH16Parsed {
   uint32_t subtype{0};
   std::vector<AneH16Surface> surfaces;
   AneH16Region text;
-  std::optional<AneH16Region> kernel;
+  std::optional<uint64_t> constants;   // __TEXT,__const VM base
+  std::vector<AneH16Region> kernels;   // __KERN_0..__KERN_n in order
   std::optional<AneH16Region> scratch; // offset unused
   size_t descriptor{0};                // file offset of the program descriptor
 };
@@ -78,13 +79,14 @@ struct AneH16Sections {
   std::vector<AneH16Surface> surfaces;            // segment order, IDs set
   std::optional<uint32_t> scratch_id;
   uint64_t scratch_bytes{0};                      // __DATA,__bss size or 0
+  std::vector<uint32_t> kernel_ids;               // per __KERN_n, when split
   std::vector<std::pair<uint32_t, uint32_t>> refs; // (BAR slot, tag)
   uint32_t tasks{0};
   uint32_t subtype{0};
 };
 
-// The reference parse(): surfaces, text and kernel sections, scratch and the
-// program descriptor. Throws AneH16HwxError.
+// The reference parse(): surfaces, text, constants and kernel sections,
+// scratch and the program descriptor. Throws AneH16HwxError.
 MLX_API AneH16Parsed h16_parse_hwx(const uint8_t* hwx, size_t size);
 
 // The reference walk(): number of tasks and the BAR slots their records

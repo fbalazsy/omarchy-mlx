@@ -189,8 +189,12 @@ AneH16Parsed h16_parse_hwx(const uint8_t* hwx, size_t size) {
           parsed.surfaces.push_back(surface);
         } else if (segment == "__TEXT" && name == "__text") {
           text = AneH16Region{svm, ssize, soff};
-        } else if (segment == "__KERN_0" && name == "__kern_0") {
-          parsed.kernel = AneH16Region{svm, ssize, soff};
+        } else if (segment == "__TEXT" && name == "__const") {
+          parsed.constants = svm;
+        } else if (
+            segment == "__KERN_" + std::to_string(parsed.kernels.size()) &&
+            name == "__kern_" + std::to_string(parsed.kernels.size())) {
+          parsed.kernels.push_back(AneH16Region{svm, ssize, soff});
         } else if (segment == "__DATA" && name == "__bss") {
           if (prot != 3) {
             refuse("scratch segment is not read/write");
@@ -327,10 +331,30 @@ AneH16Sections h16_build_sections(const uint8_t* hwx, size_t size) {
   for (const auto& surface : parsed.surfaces) {
     entries.push_back({surface.id, surface.direction, surface.allocation});
   }
+  // One LOAD slot is one BAR base: several kernel sections, or a kernel
+  // section next to the constants, travel as EXECUTE buffers.
+  std::map<uint32_t, uint64_t> bases;
+  for (uint32_t slot : slots) {
+    bases[slot] = u64(
+        hwx, size, parsed.descriptor + size_t(0x10) * (slot + 1),
+        "program descriptor ends before a referenced BAR slot");
+  }
+  const bool constants_used = parsed.constants &&
+      std::any_of(bases.begin(), bases.end(), [&](const auto& b) {
+        return b.second == *parsed.constants;
+      });
+  const bool kernel_buffers = parsed.kernels.size() > 1 ||
+      (!parsed.kernels.empty() && constants_used);
   if (parsed.scratch) {
     out.scratch_id = take_input();
     out.scratch_bytes = parsed.scratch->size;
     entries.push_back({*out.scratch_id, 1, parsed.scratch->size});
+  }
+  if (kernel_buffers) {
+    for (const auto& kernel : parsed.kernels) {
+      out.kernel_ids.push_back(take_input());
+      entries.push_back({out.kernel_ids.back(), 1, kernel.size});
+    }
   }
 
   auto& generic = out.sections[0];
@@ -349,9 +373,7 @@ AneH16Sections h16_build_sections(const uint8_t* hwx, size_t size) {
   }
 
   for (uint32_t slot : slots) {
-    const uint64_t base = u64(
-        hwx, size, parsed.descriptor + size_t(0x10) * (slot + 1),
-        "program descriptor ends before a referenced BAR slot");
+    const uint64_t base = bases[slot];
     if (base == 0) {
       continue;
     }
@@ -362,7 +384,18 @@ AneH16Sections h16_build_sections(const uint8_t* hwx, size_t size) {
       out.refs.emplace_back(slot, hit->id);
     } else if (parsed.scratch && base == parsed.scratch->vm) {
       out.refs.emplace_back(slot, *out.scratch_id);
-    } else if (parsed.kernel && base == parsed.kernel->vm) {
+    } else if (auto kernel = std::find_if(
+                   parsed.kernels.begin(), parsed.kernels.end(),
+                   [&](const AneH16Region& k) { return k.vm == base; });
+               kernel != parsed.kernels.end()) {
+      out.refs.emplace_back(
+          slot,
+          kernel_buffers ? out.kernel_ids[kernel - parsed.kernels.begin()]
+                         : kResourceKernel);
+    } else if (
+        parsed.constants && base == *parsed.constants && slot == 1 &&
+        (kernel_buffers || parsed.kernels.empty())) {
+      // Slot 1 carries the constants.
       out.refs.emplace_back(slot, kResourceKernel);
     } else {
       char hexbase[32];
@@ -371,7 +404,7 @@ AneH16Sections h16_build_sections(const uint8_t* hwx, size_t size) {
           static_cast<unsigned long long>(base));
       refuse(
           "BAR slot " + std::to_string(slot) + " base " + hexbase +
-          " names no surface, scratch or kernel");
+          " names no surface, scratch, kernel or constants");
     }
   }
   if (out.refs.empty() || out.refs.size() > kOperationRefsMax) {
